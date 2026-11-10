@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# One-time setup for the Claude desktop companion. Checks your system, installs what is
+# missing (asking first), builds the app in release mode and checks that it works.
+# Safe to run again at any time: finished steps are skipped, and a rerun rebuilds only
+# what changed.
+#
+# Usage: ./companion-install [--yes] [--gnome-extension]
+#   --yes              answer yes to the install questions (sudo may still ask for your password)
+#   --gnome-extension  also install the optional GNOME Shell extension (pointer games on Wayland)
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+cd "$here"
+bin="$here/target/release/claude-mascot"
+# edition 2024 needs Rust 1.85 or newer
+min_rust="1.85"
+
+assume_yes=0
+with_extension=0
+for arg in "$@"; do
+    case "$arg" in
+        -y | --yes) assume_yes=1 ;;
+        --gnome-extension) with_extension=1 ;;
+        -h | --help)
+            sed -n '2,10s/^# \{0,1\}//p' "$0"
+            exit 0
+            ;;
+        *)
+            printf 'companion-install: unknown option %s (try --help)\n' "$arg" >&2
+            exit 2
+            ;;
+    esac
+done
+
+step() { printf '\n==> %s\n' "$*"; }
+ok() { printf '  ok  %s\n' "$*"; }
+note() { printf '  ..  %s\n' "$*"; }
+die() {
+    printf '\ncompanion-install: %s\n' "$*" >&2
+    exit 1
+}
+# ask "question": yes with --yes, otherwise only an interactive "y" counts
+ask() {
+    ((assume_yes)) && return 0
+    [[ -t 0 ]] || return 1
+    local reply
+    read -r -p "  ??  $1 [y/N] " reply
+    [[ "$reply" =~ ^[Yy] ]]
+}
+
+# --- 1. the system ------------------------------------------------------------------------
+step "Checking your system"
+[[ "$(uname -s)" == Linux ]] || die "this companion runs on Linux only."
+os_name="Linux"
+if [[ -r /etc/os-release ]]; then
+    os_name="$(. /etc/os-release && echo "${PRETTY_NAME:-${NAME:-Linux}}")"
+fi
+pm=""
+for candidate in apt-get dnf pacman zypper; do
+    if command -v "$candidate" >/dev/null; then
+        pm="$candidate"
+        break
+    fi
+done
+ok "$os_name ($(uname -m)), package manager: ${pm:-none found}"
+session="${XDG_SESSION_TYPE:-unknown}"
+ok "session: $session, desktop: ${XDG_CURRENT_DESKTOP:-unknown}"
+if [[ "$session" == wayland && -z "${DISPLAY:-}" ]]; then
+    note "Wayland without Xwayland: the companion needs Xwayland (most desktops start it automatically)."
+fi
+
+# --- 2. system libraries and build tools --------------------------------------------------
+step "Checking system libraries and build tools"
+ldconfig="$(command -v ldconfig || echo /sbin/ldconfig)"
+installed_libs="$("$ldconfig" -p 2>/dev/null || true)"
+have_lib() { grep -q "^[[:space:]]*$1 " <<<"$installed_libs"; }
+
+# package that provides a library or tool, for the package manager found above
+package_for() {
+    case "$pm:$1" in
+        apt-get:libX11.so.6) echo libx11-6 ;;
+        apt-get:libX11-xcb.so.1) echo libx11-xcb1 ;;
+        apt-get:libxcb.so.1) echo libxcb1 ;;
+        apt-get:libXcursor.so.1) echo libxcursor1 ;;
+        apt-get:libXrandr.so.2) echo libxrandr2 ;;
+        apt-get:libXi.so.6) echo libxi6 ;;
+        apt-get:libxkbcommon.so.0) echo libxkbcommon0 ;;
+        apt-get:libxkbcommon-x11.so.0) echo libxkbcommon-x11-0 ;;
+        apt-get:libXfixes.so.3) echo libxfixes3 ;;
+        apt-get:libXss.so.1) echo libxss1 ;;
+        apt-get:cc) echo build-essential ;;
+        dnf:libX11.so.6) echo libX11 ;;
+        dnf:libX11-xcb.so.1) echo libX11-xcb ;;
+        dnf:libxcb.so.1) echo libxcb ;;
+        dnf:libXcursor.so.1) echo libXcursor ;;
+        dnf:libXrandr.so.2) echo libXrandr ;;
+        dnf:libXi.so.6) echo libXi ;;
+        dnf:libxkbcommon.so.0) echo libxkbcommon ;;
+        dnf:libxkbcommon-x11.so.0) echo libxkbcommon-x11 ;;
+        dnf:libXfixes.so.3) echo libXfixes ;;
+        dnf:libXss.so.1) echo libXScrnSaver ;;
+        dnf:cc) echo gcc ;;
+        pacman:libX11.so.6 | pacman:libX11-xcb.so.1) echo libx11 ;;
+        pacman:libxcb.so.1) echo libxcb ;;
+        pacman:libXcursor.so.1) echo libxcursor ;;
+        pacman:libXrandr.so.2) echo libxrandr ;;
+        pacman:libXi.so.6) echo libxi ;;
+        pacman:libxkbcommon.so.0) echo libxkbcommon ;;
+        pacman:libxkbcommon-x11.so.0) echo libxkbcommon-x11 ;;
+        pacman:libXfixes.so.3) echo libxfixes ;;
+        pacman:libXss.so.1) echo libxss ;;
+        pacman:cc) echo gcc ;;
+        zypper:libX11.so.6) echo libX11-6 ;;
+        zypper:libX11-xcb.so.1) echo libX11-xcb1 ;;
+        zypper:libxcb.so.1) echo libxcb1 ;;
+        zypper:libXcursor.so.1) echo libXcursor1 ;;
+        zypper:libXrandr.so.2) echo libXrandr2 ;;
+        zypper:libXi.so.6) echo libXi6 ;;
+        zypper:libxkbcommon.so.0) echo libxkbcommon0 ;;
+        zypper:libxkbcommon-x11.so.0) echo libxkbcommon-x11-0 ;;
+        zypper:libXfixes.so.3) echo libXfixes3 ;;
+        zypper:libXss.so.1) echo libXss1 ;;
+        zypper:cc) echo gcc ;;
+        *:curl) echo curl ;;
+        *) echo "" ;;
+    esac
+}
+
+required_libs=(libX11.so.6 libX11-xcb.so.1 libxcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libxkbcommon.so.0 libxkbcommon-x11.so.0)
+# nice to have: click-through around the character, and away detection on plain X11
+optional_libs=(libXfixes.so.3 libXss.so.1)
+
+need_cargo_install=0
+if ! command -v cargo >/dev/null && ! [[ -x "$HOME/.cargo/bin/cargo" ]]; then
+    need_cargo_install=1
+fi
+
+missing=()
+missing_optional=()
+for lib in "${required_libs[@]}"; do have_lib "$lib" || missing+=("$lib"); done
+for lib in "${optional_libs[@]}"; do have_lib "$lib" || missing_optional+=("$lib"); done
+command -v cc >/dev/null || missing+=(cc)
+((need_cargo_install)) && ! command -v curl >/dev/null && missing+=(curl)
+
+if ((${#missing[@]} + ${#missing_optional[@]} == 0)); then
+    ok "all libraries and build tools are present"
+else
+    ((${#missing[@]})) && note "missing: ${missing[*]}"
+    ((${#missing_optional[@]})) && note "missing (optional): ${missing_optional[*]}"
+    packages=()
+    for item in "${missing[@]}" "${missing_optional[@]}"; do
+        p="$(package_for "$item")"
+        [[ -n "$p" && ! " ${packages[*]} " =~ " $p " ]] && packages+=("$p")
+    done
+    case "$pm" in
+        apt-get) install_cmd=(sudo apt-get install -y "${packages[@]}") ;;
+        dnf) install_cmd=(sudo dnf install -y "${packages[@]}") ;;
+        pacman) install_cmd=(sudo pacman -S --needed --noconfirm "${packages[@]}") ;;
+        zypper) install_cmd=(sudo zypper --non-interactive install "${packages[@]}") ;;
+        *) install_cmd=() ;;
+    esac
+    if ((${#install_cmd[@]} == 0 || ${#packages[@]} == 0)); then
+        ((${#missing[@]})) && die "please install these with your package manager, then run ./companion-install again: ${missing[*]}"
+        note "continuing without the optional libraries"
+    else
+        printf '  ..  installing them needs administrator rights (sudo). The command is:\n        %s\n' "${install_cmd[*]}"
+        if ask "Run it now?"; then
+            "${install_cmd[@]}" || die "the package install failed. On Debian/Ubuntu, 'sudo apt-get update' first may help. Then run ./companion-install again."
+            installed_libs="$("$ldconfig" -p 2>/dev/null || true)"
+            for lib in "${required_libs[@]}"; do have_lib "$lib" || die "$lib is still missing after the install."; done
+            ok "system packages installed"
+        elif ((${#missing[@]})); then
+            die "required packages are missing. Run the command above yourself, then run ./companion-install again."
+        else
+            note "continuing without the optional libraries"
+        fi
+    fi
+fi
+
+# --- 3. Rust ------------------------------------------------------------------------------
+step "Checking the Rust toolchain"
+export PATH="$HOME/.cargo/bin:$PATH"
+if ! command -v cargo >/dev/null; then
+    note "Rust is not installed. The official installer (rustup) puts it in ~/.rustup and ~/.cargo,"
+    note "needs no sudo, and is left out of your shell profile (these scripts find it themselves)."
+    if ask "Download and run the Rust installer from https://sh.rustup.rs now?"; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path ||
+            die "the Rust install failed. See https://rustup.rs to install it yourself."
+    else
+        die "Rust is needed to build the companion. Install it from https://rustup.rs, then run ./companion-install again."
+    fi
+fi
+rust_version="$(rustc --version | awk '{print $2}')"
+if [[ "$(printf '%s\n%s\n' "$min_rust" "$rust_version" | sort -V | head -n1)" != "$min_rust" ]]; then
+    note "Rust $rust_version is older than the $min_rust this project needs."
+    if command -v rustup >/dev/null && ask "Update it with 'rustup update stable'?"; then
+        rustup update stable || die "the Rust update failed."
+        rust_version="$(rustc --version | awk '{print $2}')"
+    else
+        die "please update Rust to $min_rust or newer (https://rustup.rs), then run ./companion-install again."
+    fi
+fi
+ok "Rust $rust_version ($(command -v cargo))"
+
+# --- 4. build -----------------------------------------------------------------------------
+step "Building the companion (release mode; the first build downloads crates and takes about a minute)"
+[[ -d assets/pixel && -f Cargo.lock ]] || die "the project files look incomplete (assets/pixel or Cargo.lock is missing)."
+cargo build --release --locked || die "the build failed; the messages above say why."
+[[ -x "$bin" ]] || die "the build finished but $bin is missing."
+ok "built $(realpath --relative-to="$here" "$bin") ($(du -h "$bin" | cut -f1))"
+
+# --- 5. permissions -----------------------------------------------------------------------
+step "Setting permissions"
+chmod +x companion companion-install install-cursor-extension.sh "$bin"
+ok "companion, companion-install and the app are executable"
+
+# --- 6. verify ----------------------------------------------------------------------------
+step "Checking the build"
+"$bin" --print-config | grep -q '^size = ' || die "the app does not start: '$bin --print-config' failed."
+if ldd "$bin" 2>/dev/null | grep -q 'not found'; then
+    die "the app is missing libraries: $(ldd "$bin" | grep 'not found' | tr -s ' \t' ' ')"
+fi
+frames="$(mktemp -d)"
+trap 'rm -rf "$frames"' EXIT
+"$bin" --export-frames "$frames" >/dev/null || die "the app could not draw its sprites."
+count="$(find "$frames" -name '*.png' | wc -l)"
+((count >= 25)) || die "the app drew only $count of its animations."
+ok "the app starts, and draws all $count animations (sprites are built into the binary)"
+
+# --- 7. optional GNOME extension ----------------------------------------------------------
+if ((with_extension)); then
+    step "Installing the GNOME Shell extension"
+    ./install-cursor-extension.sh
+elif [[ "$session" == wayland && "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]]; then
+    note "Optional, for following the pointer and pointer games on GNOME Wayland:"
+    note "  ./companion-install --gnome-extension   (then log out and back in once)"
+fi
+
+printf '\nReady. Start Claude with:  ./companion\n'

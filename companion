@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Starts the Claude desktop companion. It stays attached to this terminal:
+# press Ctrl+C, or close the terminal, to stop it.
+#
+# Usage: ./companion                    run it
+#        ./companion --print-config     print every setting with its default
+#        ./companion --help             other options
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+bin="$here/target/release/claude-mascot"
+
+fail() {
+    printf 'companion: %s\n' "$*" >&2
+    exit 1
+}
+
+[[ -x "$bin" ]] || fail "Claude is not built yet. Run ./companion-install first."
+
+# a heads-up if the code changed since the last build (the old build still starts)
+if [[ -n "$(find "$here/src" "$here/assets" "$here/Cargo.toml" "$here/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)" ]]; then
+    printf 'companion: the code changed since the last build; run ./companion-install to rebuild. Starting the existing build.\n' >&2
+fi
+
+if [[ $# -eq 0 ]]; then
+    [[ -n "${DISPLAY:-}" ]] || fail "no desktop display found (DISPLAY is not set). Start it from a terminal inside your desktop session. On Wayland, Xwayland must be available."
+
+    ldconfig="$(command -v ldconfig || echo /sbin/ldconfig)"
+    if [[ -x "$ldconfig" ]]; then
+        libs="$("$ldconfig" -p 2>/dev/null || true)"
+        missing=()
+        for lib in libX11.so.6 libX11-xcb.so.1 libxcb.so.1 libXcursor.so.1 libXrandr.so.2 libXi.so.6 libxkbcommon.so.0 libxkbcommon-x11.so.0; do
+            grep -q "^[[:space:]]*$lib " <<<"$libs" || missing+=("$lib")
+        done
+        ((${#missing[@]} == 0)) || fail "missing system libraries: ${missing[*]}. Run ./companion-install to install them."
+    fi
+fi
+
+# exec: the app takes this shell's place, so Ctrl+C and closing the terminal reach it directly
+exec "$bin" "$@"

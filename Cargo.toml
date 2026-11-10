@@ -1,0 +1,20 @@
+[package]
+name = "claude-mascot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# X11 only: GNOME/Wayland gives native Wayland clients no always-on-top, Xwayland does.
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen"] }
+tiny-skia = "0.11"
+# already pulled in by winit; used to set one window-manager hint winit does not expose
+x11-dl = "2.21"
+# already pulled in by x11-dl; used to open libXss by the name distributions ship
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,14 @@
+{
+  "uuid": "claude-mascot-cursor@claude.local",
+  "name": "Claude Mascot Companion",
+  "description": "Lets the claude-mascot desktop companion see the mouse pointer and, only while you are away from keyboard and mouse, play with it. Any key press or mouse movement hands the pointer straight back. Never clicks or types.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "version": 2
+}
